@@ -8,21 +8,11 @@
 #include "flash_attn/static_switch.h"
 #include "tensor.h"
 
-void run_fmha_fwd(Launch_params<FMHA_fprop_params> &launch_params) {
-    if (launch_params.params.d <= 32) {
-        run_fmha_fwd_hdim32(launch_params);
-    } else if (launch_params.params.d <= 64) {
-        run_fmha_fwd_hdim64(launch_params);
-    } else if (launch_params.params.d <= 128) {
-        run_fmha_fwd_hdim128(launch_params);
-    }
-}
-
 Launch_params<FMHA_fprop_params> set_fmha_fwd_params(Tensor<cutlass::half_t> *Q, Tensor<cutlass::half_t> *K,
                                                      Tensor<cutlass::half_t> *V, Tensor<cutlass::half_t> *O,
                                                      int *cu_seq_q, int *cu_seq_k, size_t batch, size_t max_seq_q,
                                                      size_t max_seq_k, bool is_causal, int num_splits,
-                                                     cudaDeviceProp *dev_prop) {
+                                                     cudaStream_t stream, cudaDeviceProp *dev_prop, bool is_alibi) {
     size_t total_q = Q->getShape()[0];
     size_t head_q = Q->getShape()[1];
     size_t dim = Q->getShape()[2];
@@ -30,10 +20,9 @@ Launch_params<FMHA_fprop_params> set_fmha_fwd_params(Tensor<cutlass::half_t> *Q,
 
     FAI_CHECK_LE(dim, 128);
     FAI_CHECK_EQ(dim % 8, 0);
-    FAI_CHECK_GE(head_q, head_k);
     FAI_CHECK_EQ(head_q % head_k, 0);
 
-    Launch_params<FMHA_fprop_params> launch_params(dev_prop, nullptr);
+    Launch_params<FMHA_fprop_params> launch_params(dev_prop, stream);
 
     // Reset the parameters
     memset(&launch_params.params, 0, sizeof(launch_params.params));
@@ -74,12 +63,15 @@ Launch_params<FMHA_fprop_params> set_fmha_fwd_params(Tensor<cutlass::half_t> *Q,
 
     launch_params.params.o_tmp_ptr = nullptr;
     if (round_max_seq_k > blocksize_c) {
-        Tensor<float> *o_tmp = new Tensor<float>({total_q, head_q, dim});
+        Tensor<float> *o_tmp = new Tensor<float>({total_q, head_q, dim}, "Tensor o_tmp");
+        FAI_CHECK(o_tmp);
         launch_params.params.o_tmp_ptr = reinterpret_cast<void *>(o_tmp->getDevPtr());
     }
 
     // Softmax sum
-    Tensor<float> *softmax_lse = new Tensor<float>({batch, head_q, static_cast<size_t>(round_max_seq_q)});
+    Tensor<float> *softmax_lse =
+        new Tensor<float>({batch, head_q, static_cast<size_t>(round_max_seq_q)}, "Tensor softmax_lse");
+    FAI_CHECK(softmax_lse);
     launch_params.params.softmax_lse_ptr = reinterpret_cast<void *>(softmax_lse->getDevPtr());
 
     // Set the dimensions.
@@ -88,7 +80,7 @@ Launch_params<FMHA_fprop_params> set_fmha_fwd_params(Tensor<cutlass::half_t> *Q,
     launch_params.params.seqlen_k = round_max_seq_k;
     launch_params.params.d = dim;
 
-    launch_params.params.scale_bmm1f = 1.0 / sqrtf(dim);
+    launch_params.params.scale_bmm1f = 1.0 / std::sqrt(dim);
     set_alpha(launch_params.params.scale_bmm1, launch_params.params.scale_bmm1f, DATA_TYPE_FP16);
 
     launch_params.params.cu_seqlens_q = cu_seq_q;
@@ -98,13 +90,26 @@ Launch_params<FMHA_fprop_params> set_fmha_fwd_params(Tensor<cutlass::half_t> *Q,
 
     launch_params.params.num_splits = num_splits;
 
+    launch_params.params.is_alibi = is_alibi;
+
     return launch_params;
+}
+
+void run_fmha_fwd(Launch_params<FMHA_fprop_params> &launch_params) {
+    if (launch_params.params.d <= 32) {
+        run_fmha_fwd_hdim32(launch_params);
+    } else if (launch_params.params.d <= 64) {
+        run_fmha_fwd_hdim64(launch_params);
+    } else if (launch_params.params.d <= 128) {
+        run_fmha_fwd_hdim128(launch_params);
+    }
 }
 
 void flash_attn(Tensor<cutlass::half_t> *Q, Tensor<cutlass::half_t> *K, Tensor<cutlass::half_t> *V,
                 Tensor<cutlass::half_t> *O, int *cu_seq_q, int *cu_seq_k, size_t batch, size_t max_seq_q,
-                size_t max_seq_k, bool is_causal, int num_splits, cudaDeviceProp *dev_prop) {
+                size_t max_seq_k, bool is_causal, int num_splits, cudaStream_t stream, cudaDeviceProp *dev_prop,
+                bool is_alibi) {
     static Launch_params<FMHA_fprop_params> launch_params = set_fmha_fwd_params(
-        Q, K, V, O, cu_seq_q, cu_seq_k, batch, max_seq_q, max_seq_k, is_causal, num_splits, dev_prop);
+        Q, K, V, O, cu_seq_q, cu_seq_k, batch, max_seq_q, max_seq_k, is_causal, num_splits, stream, dev_prop, is_alibi);
     run_fmha_fwd(launch_params);
 }

@@ -12,7 +12,7 @@ echo "========== build enter =========="
 
 WORK_PATH=$(cd $(dirname $0) && pwd) && cd $WORK_PATH
 
-CUDA_ARCHITECTURE=86 # a: (RTX3080Ti / RTX3090 / RTX A6000: 86, Tesla A100: 80)
+CUDA_ARCHITECTURE=86 # a: (NVIDIA A100: 80, RTX3080Ti / RTX3090 / RTX A6000: 86)
 BUILD_TYPE=Release # t: (Debug, Release)
 VERBOSE_MAKEFILE=OFF # b: (ON, OFF)
 
@@ -50,7 +50,7 @@ echo_cmd "mkdir build"
 
 echo_cmd "cd build"
 echo_cmd "cmake -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURE -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DFAI_VERBOSE_MAKEFILE=$VERBOSE_MAKEFILE -DCMAKE_INSTALL_PREFIX=$WORK_PATH/output -DCMAKE_SKIP_RPATH=ON .."
-echo_cmd "make -j"
+echo_cmd "make -j$(nproc --ignore=2)"
 echo_cmd "make install"
 
 echo "========== build info =========="

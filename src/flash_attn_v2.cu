@@ -10,19 +10,15 @@
 
 #define M_LOG2E 1.4426950408889634074  // log_2 e
 
-void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
-    FWD_HEADDIM_SWITCH(params.d, [&] { run_mha_fwd_<cutlass::half_t, kHeadDim>(params, stream); });
-}
-
 Flash_fwd_params set_mha_fwd_params(Tensor<cutlass::half_t> *Q, Tensor<cutlass::half_t> *K, Tensor<cutlass::half_t> *V,
                                     Tensor<cutlass::half_t> *O, int *cu_seq_q, int *cu_seq_k, size_t batch,
-                                    size_t max_seq_q, size_t max_seq_k, bool is_causal, cudaDeviceProp *dev_prop) {
+                                    size_t max_seq_q, size_t max_seq_k, bool is_causal, cudaDeviceProp *dev_prop,
+                                    bool is_alibi) {
     size_t head_q = Q->getShape()[1];
     size_t dim = Q->getShape()[2];
     size_t head_k = K->getShape()[1];
 
     FAI_CHECK_LE(dim, 256);
-    FAI_CHECK_GE(head_q, head_k);
     FAI_CHECK_EQ(head_q % head_k, 0);
 
     Flash_fwd_params params;
@@ -65,7 +61,8 @@ Flash_fwd_params set_mha_fwd_params(Tensor<cutlass::half_t> *Q, Tensor<cutlass::
     params.o_head_stride = dim;
 
     // Softmax sum
-    Tensor<float> *softmax_lse = new Tensor<float>({batch, head_q, max_seq_q});
+    Tensor<float> *softmax_lse = new Tensor<float>({batch, head_q, max_seq_q}, "Tensor softmax_lse");
+    FAI_CHECK(softmax_lse);
     params.softmax_lse_ptr = reinterpret_cast<void *>(softmax_lse->getDevPtr());
 
     // Set the dimensions.
@@ -74,21 +71,27 @@ Flash_fwd_params set_mha_fwd_params(Tensor<cutlass::half_t> *Q, Tensor<cutlass::
     params.seqlen_k = max_seq_k;
     params.d = dim;
 
-    params.scale_softmax = 1.0 / sqrtf(dim);
+    params.scale_softmax = 1.0 / std::sqrt(dim);
     params.scale_softmax_log2 = params.scale_softmax * M_LOG2E;
 
     params.is_causal = is_causal;
 
     params.props = dev_prop;
     params.is_sm8x = params.props->major == 8 && params.props->minor > 0;
+    params.is_alibi = is_alibi;
 
     return params;
 }
 
+void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+    FWD_HEADDIM_SWITCH(params.d, [&] { run_mha_fwd_<cutlass::half_t, kHeadDim>(params, stream); });
+}
+
 void flash_attn_v2(Tensor<cutlass::half_t> *Q, Tensor<cutlass::half_t> *K, Tensor<cutlass::half_t> *V,
                    Tensor<cutlass::half_t> *O, int *cu_seq_q, int *cu_seq_k, size_t batch, size_t max_seq_q,
-                   size_t max_seq_k, bool is_causal, int num_splits, cudaDeviceProp *dev_prop) {
+                   size_t max_seq_k, bool is_causal, int num_splits, cudaStream_t stream, cudaDeviceProp *dev_prop,
+                   bool is_alibi) {
     static Flash_fwd_params params =
-        set_mha_fwd_params(Q, K, V, O, cu_seq_q, cu_seq_k, batch, max_seq_q, max_seq_k, is_causal, dev_prop);
-    run_mha_fwd(params, nullptr);
+        set_mha_fwd_params(Q, K, V, O, cu_seq_q, cu_seq_k, batch, max_seq_q, max_seq_k, is_causal, dev_prop, is_alibi);
+    run_mha_fwd(params, stream);
 }

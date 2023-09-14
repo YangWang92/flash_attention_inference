@@ -42,7 +42,11 @@ template <int THREADS_PER_CTA>
 struct BlockInfoPadded {
     template <typename Params>
     __device__ BlockInfoPadded(const Params &params, const int bidb, const int bidh, const int tidx)
-        : bidb(bidb), bidh(bidh), bidh_k(bidh / params.h_h_k_ratio), h(params.h) {
+        : bidb(bidb),
+          bidh(bidh),
+          bidh_k(bidh / params.h_h_k_ratio),
+          h(params.h),
+          h_slope(1.0 / (exp2f(8.0 * (bidh + 1) / params.h) * params.scale_bmm1f)) {
         // The block index.
         sum_s_k = params.cu_seqlens_k[bidb];
         actual_seqlen_k = params.cu_seqlens_k[bidb + 1] - sum_s_k;
@@ -67,6 +71,7 @@ struct BlockInfoPadded {
     int tidx_global;
     int h;
     int row_shift;
+    float h_slope;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

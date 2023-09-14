@@ -41,9 +41,9 @@ inline int num_splits_heuristic_fwd(int batch_nheads, int num_SMs, int ctas_per_
     return 1;
 }
 
-template <typename Kernel_traits, bool Is_causal>
+template <typename Kernel_traits, bool Is_causal, bool Is_alibi>
 __global__ void fmha_fwd_loop_kernel(FMHA_fprop_params params) {
-    fmha::device_1xN_loop<Kernel_traits, Is_causal>(params);
+    fmha::device_1xN_loop<Kernel_traits, Is_causal, Is_alibi>(params);
 }
 
 template <typename Kernel_traits>
@@ -58,8 +58,11 @@ void run_fmha_fwd_loop(Launch_params<FMHA_fprop_params> &launch_params) {
     // Work-around for gcc 7. It doesn't like nested BOOL_SWITCH.
     // https://github.com/kokkos/kokkos-kernels/issues/349
     // https://github.com/HazyResearch/flash-attention/issues/21
-    auto kernel = launch_params.params.is_causal ? &fmha_fwd_loop_kernel<Kernel_traits, true>
-                                                 : &fmha_fwd_loop_kernel<Kernel_traits, false>;
+    auto kernel = launch_params.params.is_causal
+                      ? (launch_params.params.is_alibi ? &fmha_fwd_loop_kernel<Kernel_traits, true, true>
+                                                       : &fmha_fwd_loop_kernel<Kernel_traits, true, false>)
+                      : (launch_params.params.is_alibi ? &fmha_fwd_loop_kernel<Kernel_traits, false, true>
+                                                       : &fmha_fwd_loop_kernel<Kernel_traits, false, false>);
     if (smem_size >= 48 * 1024) {
         FAI_CHECK_CUDART_ERROR(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     }

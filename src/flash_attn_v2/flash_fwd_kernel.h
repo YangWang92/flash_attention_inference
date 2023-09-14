@@ -13,6 +13,7 @@
 #include <cute/algorithm/copy.hpp>
 #include <cute/algorithm/gemm.hpp>
 
+#include "flash_attn_v2/alibi.h"
 #include "flash_attn_v2/block_info.h"
 #include "flash_attn_v2/kernel_traits.h"
 #include "flash_attn_v2/softmax.h"
@@ -92,7 +93,7 @@ inline __device__ void softmax_rescale_o(Tensor0 &scores, Tensor1 &scores_max, T
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <typename Kernel_traits, bool Is_causal, bool Is_even_MN, bool Is_even_K, typename Params>
+template <typename Kernel_traits, bool Is_causal, bool Is_alibi, bool Is_even_MN, bool Is_even_K, typename Params>
 inline __device__ void compute_attn_1rowblock(const Params &params, const int bidb, const int bidh, const int m_block) {
     using Element = typename Kernel_traits::Element;
     using ElementAccum = typename Kernel_traits::ElementAccum;
@@ -110,7 +111,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     constexpr int kNWarps = Kernel_traits::kNWarps;
     constexpr int MMA_M = kBlockM / decltype(size<0>(typename Kernel_traits::TiledMma::TiledShape_MNK{}))::value;
 
-    const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
+    const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb, bidh);
     if (m_block * kBlockM >= binfo.actual_seqlen_q || binfo.actual_seqlen_k == 0)
         return;
 
@@ -360,6 +361,12 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
                                                                smem_thr_copy_K);
         // if (cute::thread0()) { print(acc_s); }
 
+        if (Is_alibi) {
+            flash::add_alibi<kBlockN, kNWarps>(
+                acc_s, binfo.h_slope, m_block * kBlockM, std::min(binfo.actual_seqlen_q, (m_block + 1) * kBlockM),
+                n_block * kBlockN, std::min(binfo.actual_seqlen_k, (n_block + 1) * kBlockN), binfo.row_shift);
+        }
+
         // Reshape acc_s from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         // if (cute::thread0()) { print(scores); }
@@ -438,6 +445,12 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         flash::gemm</*A_in_regs=*/Kernel_traits::Is_Q_in_regs>(acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma,
                                                                smem_tiled_copy_Q, smem_tiled_copy_K, smem_thr_copy_Q,
                                                                smem_thr_copy_K);
+
+        if (Is_alibi) {
+            flash::add_alibi<kBlockN, kNWarps>(
+                acc_s, binfo.h_slope, m_block * kBlockM, std::min(binfo.actual_seqlen_q, (m_block + 1) * kBlockM),
+                n_block * kBlockN, std::min(binfo.actual_seqlen_k, (n_block + 1) * kBlockN), binfo.row_shift);
+        }
 
         flash::cp_async_wait<0>();
         __syncthreads();
@@ -550,7 +563,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <typename Kernel_traits, bool Is_causal, bool Is_even_MN, bool Is_even_K, typename Params>
+template <typename Kernel_traits, bool Is_causal, bool Is_alibi, bool Is_even_MN, bool Is_even_K, typename Params>
 inline __device__ void compute_attn(const Params &params) {
     const int m_block = blockIdx.x;
     // The block index for the batch.
@@ -558,7 +571,8 @@ inline __device__ void compute_attn(const Params &params) {
     // The block index for the head.
     const int bidh = blockIdx.z;
 
-    flash::compute_attn_1rowblock<Kernel_traits, Is_causal, Is_even_MN, Is_even_K>(params, bidb, bidh, m_block);
+    flash::compute_attn_1rowblock<Kernel_traits, Is_causal, Is_alibi, Is_even_MN, Is_even_K>(params, bidb, bidh,
+                                                                                             m_block);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

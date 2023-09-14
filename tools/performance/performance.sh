@@ -10,4 +10,8 @@ set -euo pipefail
 
 WORK_PATH=$(cd $(dirname $0) && pwd) && cd $WORK_PATH
 
-python3 $WORK_PATH/performance.py -p $WORK_PATH/../../log/
+python3 $WORK_PATH/performance.py -p $WORK_PATH/../../log/prefill_seq/
+python3 $WORK_PATH/performance.py -p $WORK_PATH/../../log/prefill_batch/
+python3 $WORK_PATH/performance.py -p $WORK_PATH/../../log/decoding_seq/
+python3 $WORK_PATH/performance.py -p $WORK_PATH/../../log/decoding_batch/
+python3 $WORK_PATH/performance.py -p $WORK_PATH/../../log/hybrid/

@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <flash_attn/fmha/alibi.h>
 #include <flash_attn/fmha/gemm.h>
 #include <flash_attn/fmha/kernel_traits.h>
 #include <flash_attn/fmha/utils.h>
@@ -190,7 +191,7 @@ constexpr size_t get_dynamic_smem_size() {
     return Gemm_Q_K<Kernel_traits, Kernel_traits::K_IN_REGS>::SMEM_BYTES;
 }
 
-template <typename Kernel_traits, bool Is_causal, bool Is_first, bool Is_last, typename Params>
+template <typename Kernel_traits, bool Is_causal, bool Is_alibi, bool Is_first, bool Is_last, typename Params>
 inline __device__ void device_1xN_(const Params &params, const int bidb, const int bidh, int steps,
                                    const int loop_step_idx) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
@@ -385,6 +386,13 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
         // if ((threadIdx.x == 0) && (blockIdx.x == 0) && (blockIdx.y == 0) && (l == 0))  {
         //     printf("acc_p=%.6f, %.6f\n", acc_p[0][0].elt(0), acc_p[0][0].elt(1));
         // }
+
+        if (Is_alibi) {
+            add_alibi<Cta_tile_p::N>(
+                acc_p, binfo.h_slope, (begin + l) * Cta_tile_p::M,
+                std::min(binfo.actual_seqlen_q, (begin + l + 1) * Cta_tile_p::M), loop_step_idx * Cta_tile_p::N,
+                std::min(binfo.actual_seqlen_k, (loop_step_idx + 1) * Cta_tile_p::N), binfo.row_shift);
+        }
 
         uint4 out[Gmem_tile_o::STGS_PER_LOOP];
         if (!Is_first) {
@@ -618,7 +626,7 @@ inline __device__ void device_1xN_(const Params &params, const int bidb, const i
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <typename Kernel_traits, bool Is_causal, typename Params>
+template <typename Kernel_traits, bool Is_causal, bool Is_alibi, typename Params>
 inline __device__ void device_1xN_loop(const Params &params) {
     // The block index for the batch.
     const int bidb = blockIdx.x;
@@ -630,14 +638,16 @@ inline __device__ void device_1xN_loop(const Params &params) {
 
     constexpr int blocksize_c = Kernel_traits::Cta_tile_p::N;
     if (params.seqlen_k == blocksize_c) {
-        fmha::device_1xN_<Kernel_traits, Is_causal, true, true>(params, bidb, bidh, STEPS, 0);
+        fmha::device_1xN_<Kernel_traits, Is_causal, Is_alibi, true, true>(params, bidb, bidh, STEPS, 0);
     } else {
         const int max_loop_steps = (params.seqlen_k + blocksize_c - 1) / blocksize_c;
-        fmha::device_1xN_<Kernel_traits, Is_causal, true, false>(params, bidb, bidh, STEPS, 0);
+        fmha::device_1xN_<Kernel_traits, Is_causal, Is_alibi, true, false>(params, bidb, bidh, STEPS, 0);
         for (int loop_step_idx = 1; loop_step_idx < max_loop_steps - 1; loop_step_idx++) {
-            fmha::device_1xN_<Kernel_traits, Is_causal, false, false>(params, bidb, bidh, STEPS, loop_step_idx);
+            fmha::device_1xN_<Kernel_traits, Is_causal, Is_alibi, false, false>(params, bidb, bidh, STEPS,
+                                                                                loop_step_idx);
         }
-        fmha::device_1xN_<Kernel_traits, Is_causal, false, true>(params, bidb, bidh, STEPS, max_loop_steps - 1);
+        fmha::device_1xN_<Kernel_traits, Is_causal, Is_alibi, false, true>(params, bidb, bidh, STEPS,
+                                                                           max_loop_steps - 1);
     }
 }
 
